@@ -1,3 +1,5 @@
+
+
 fn main() {
-    println!("Hello, world!");
+    quic_server_from_scratch::run();
 }
