@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytes = "1.11.1"
+hex = "0.4.3"
 nix = { version = "0.31.2", features = ["fs", "net", "poll","process"]}
 ring = "0.17.14"

@@ -1,50 +1,69 @@
-use std::{os::fd::AsFd, str::FromStr};
+use std::{os::fd::AsFd, os::fd::AsRawFd, str::FromStr};
 
-use nix::{poll::PollTimeout, sys::socket::{
-    AddressFamily, SockFlag, SockType, SockaddrIn, bind, setsockopt, socket, sockopt::{Broadcast, RcvBuf, ReuseAddr, SndBuf}}};
+use nix::{
+    poll::PollTimeout,
+    sys::socket::{
+        bind, recvfrom, setsockopt, socket, sockopt::ReuseAddr, AddressFamily, SockFlag, SockType,
+        SockaddrIn,
+    },
+};
 
 use nix::poll::{poll, PollFd, PollFlags};
 
-use std::os::fd::AsRawFd;
-
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 
+mod handshake;
+use handshake::*;
 
-pub fn run () {
-
-    let sock_addr = SockaddrIn::from_str("0.0.0.0:3000").unwrap(); 
+pub fn run() {
+    let sock_addr = SockaddrIn::from_str("0.0.0.0:3000").unwrap();
 
     let fd = socket(
-        AddressFamily::Inet, 
-        SockType::Datagram, 
-        SockFlag::empty(), 
-        None, 
-    ).unwrap();
+        AddressFamily::Inet,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    )
+    .unwrap();
 
-    let flags = OFlag::from_bits_truncate(
-        fcntl(
-        &fd, 
-        FcntlArg::F_GETFL
-    ).unwrap());
+    let flags = OFlag::from_bits_truncate(fcntl(&fd, FcntlArg::F_GETFL).unwrap());
 
     let new_flags = flags | OFlag::O_NONBLOCK;
 
     fcntl(&fd, FcntlArg::F_SETFL(new_flags)).unwrap();
 
-    bind(fd.as_raw_fd(), &sock_addr).unwrap(); 
+    bind(fd.as_raw_fd(), &sock_addr).unwrap();
 
     setsockopt(&fd, ReuseAddr, &true).unwrap();
 
     loop {
         println!("Polling socket address");
 
-        let is_ready = poll(&mut [PollFd::new(fd.as_fd(), PollFlags::POLLIN)], PollTimeout::from(1000 as u16)).unwrap(); 
+        let is_ready = poll(
+            &mut [PollFd::new(fd.as_fd(), PollFlags::POLLIN)],
+            PollTimeout::from(1000 as u16),
+        )
+        .unwrap();
 
         if is_ready >= 1 {
             println!("Connection made");
-            break; 
-        };
-        
-    }
 
+            let mut recv_buf = vec![0u8; 1200];
+            let (n, addr) = recvfrom::<SockaddrIn>(fd.as_raw_fd(), &mut recv_buf).unwrap();
+
+            // println!("Connection from {}", &addr.unwrap().to_string());
+
+            recv_buf.truncate(n);
+
+            let (client_key, client_iv, client_hp, server_key, server_iv, server_hp) = get_secrets(&recv_buf).unwrap();
+
+            println!("Client Key: {:?}", client_key);
+            println!("Client IV: {:?}", client_iv);
+            println!("Client HP: {:?}", client_hp);
+            println!("Server Key: {:?}", server_key);
+            println!("Server IV: {:?}", server_iv);
+            println!("Server HP: {:?}", server_hp);
+            break;
+        };
+    }
 }
