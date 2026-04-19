@@ -3,14 +3,14 @@ use std::{os::fd::AsFd, os::fd::AsRawFd, str::FromStr};
 use nix::{
     poll::PollTimeout,
     sys::socket::{
-        bind, recvfrom, setsockopt, socket, sockopt::ReuseAddr, AddressFamily, SockFlag, SockType,
-        SockaddrIn,
+        AddressFamily, SockFlag, SockType, SockaddrIn, bind, recvfrom, setsockopt, socket,
+        sockopt::ReuseAddr,
     },
 };
 
-use nix::poll::{poll, PollFd, PollFlags};
+use nix::poll::{PollFd, PollFlags, poll};
 
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
 mod handshake;
 use handshake::*;
@@ -55,14 +55,16 @@ pub fn run() {
 
             recv_buf.truncate(n);
 
-            let (client_key, client_iv, client_hp, server_key, server_iv, server_hp) = get_secrets(&recv_buf).unwrap();
+            // let (client_key, client_iv, client_hp, server_key, server_iv, server_hp) =
+            //    get_secrets(&recv_buf).unwrap();
+            let secrets = ExchangeSecrets::try_from(recv_buf).unwrap();
 
-            println!("Client Key: {:?}", client_key);
-            println!("Client IV: {:?}", client_iv);
-            println!("Client HP: {:?}", client_hp);
-            println!("Server Key: {:?}", server_key);
-            println!("Server IV: {:?}", server_iv);
-            println!("Server HP: {:?}", server_hp);
+            println!("Client Key: {:?}", secrets.client_key);
+            println!("Client IV: {:?}", secrets.client_iv);
+            println!("Client HP: {:?}", secrets.client_hp);
+            println!("Server Key: {:?}", secrets.server_key);
+            println!("Server IV: {:?}", secrets.server_iv);
+            println!("Server HP: {:?}", secrets.server_hp);
             break;
         };
     }
