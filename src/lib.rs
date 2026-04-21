@@ -12,8 +12,8 @@ use nix::poll::{PollFd, PollFlags, poll};
 
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
-mod handshake;
-use handshake::*;
+mod hello;
+use hello::*;
 
 pub fn run() {
     let sock_addr = SockaddrIn::from_str("0.0.0.0:3000").unwrap();
@@ -57,14 +57,14 @@ pub fn run() {
 
             // let (client_key, client_iv, client_hp, server_key, server_iv, server_hp) =
             //    get_secrets(&recv_buf).unwrap();
-            let secrets = ExchangeSecrets::try_from(recv_buf).unwrap();
+            let client_hello = ClientHello::try_from(&recv_buf).unwrap();
 
-            println!("Client Key: {:?}", secrets.client_key);
-            println!("Client IV: {:?}", secrets.client_iv);
-            println!("Client HP: {:?}", secrets.client_hp);
-            println!("Server Key: {:?}", secrets.server_key);
-            println!("Server IV: {:?}", secrets.server_iv);
-            println!("Server HP: {:?}", secrets.server_hp);
+            // println!("Client Key: {:?}", secrets.client_key);
+            // println!("Client IV: {:?}", secrets.client_iv);
+            // println!("Client HP: {:?}", secrets.client_hp);
+            // println!("Server Key: {:?}", secrets.server_key);
+            // println!("Server IV: {:?}", secrets.server_iv);
+            // println!("Server HP: {:?}", secrets.server_hp);
             break;
         };
     }
