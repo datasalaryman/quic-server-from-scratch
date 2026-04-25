@@ -2,7 +2,8 @@ use std::io::{Error, ErrorKind::InvalidData};
 
 use bytes::{Buf, BytesMut};
 
-use ring::hkdf::{HKDF_SHA256, KeyType, Prk, Salt};
+use hkdf::Hkdf;
+use sha2::Sha256;
 
 pub struct ExchangeSecrets {
     pub client_key: [u8; 16],
@@ -22,47 +23,39 @@ impl ExchangeSecrets {
 
         let init_hex = hex::decode("38762cf7f55934b34d179ae6a4c80cadccbb7f0a").unwrap();
 
-        let salt = Salt::new(HKDF_SHA256, init_hex.as_slice());
+        // let salt = Salt::new(HKDF_SHA256, init_hex.as_slice());
 
-        let prk = salt.extract(&dcid);
+        // let prk = salt.extract(&dcid);
+
+        let hk = Hkdf::<Sha256>::new(Some(&init_hex), dcid);
 
         let mut client_i_s = [0u8; 32];
         let mut server_i_s = [0u8; 32];
+        let mut client_label = Vec::<u8>::new(); 
+        let mut server_label = Vec::<u8>::new();
 
-        prk.expand(&[b"client in"], HKDF_SHA256)
-            .unwrap()
-            .fill(&mut client_i_s)
-            .unwrap();
+        let label_prefix = &(0 as u16).to_be_bytes(); 
+        
+        let client_label_body = [&b"tls13 "[..], &b"client in"[..]].concat();
+        
+        let server_label_body = [&b"tls13 "[..], &b"server in"[..]].concat();
 
-        prk.expand(&[b"server in"], HKDF_SHA256)
-            .unwrap()
-            .fill(&mut server_i_s)
-            .unwrap();
+        client_label.extend_from_slice(&(client_i_s.len() as u16).to_be_bytes());
+        client_label.push(client_label_body.len() as u8);
+        client_label.extend_from_slice(&client_label_body);
+        client_label.push(0 as u8);        
+        
+        server_label.extend_from_slice(&(server_i_s.len() as u16).to_be_bytes());
+        server_label.push(server_label_body.len() as u8);
+        server_label.extend_from_slice(&server_label_body);
+        server_label.push(0 as u8);        
+       
+        hk.expand(&client_label, &mut client_i_s).unwrap();
+        hk.expand(&client_label, &mut server_i_s).unwrap();
 
-        let client_prk = Prk::new_less_safe(HKDF_SHA256, &client_i_s);
+        let client_prk = Hkdf::<Sha256>::from_prk(&client_i_s).unwrap();
 
-        struct pr_key_type;
-        impl KeyType for pr_key_type {
-            fn len(&self) -> usize {
-                16
-            }
-        }
-
-        struct iv_key_type;
-        impl KeyType for iv_key_type {
-            fn len(&self) -> usize {
-                12
-            }
-        }
-
-        struct hp_key_type;
-        impl KeyType for hp_key_type {
-            fn len(&self) -> usize {
-                16
-            }
-        }
-
-        let server_prk = Prk::new_less_safe(HKDF_SHA256, &server_i_s);
+        let server_prk = Hkdf::<Sha256>::from_prk(&server_i_s).unwrap();
 
         let mut client_key = [0u8; 16];
         let mut client_iv = [0u8; 12];
@@ -71,42 +64,6 @@ impl ExchangeSecrets {
         let mut server_key = [0u8; 16];
         let mut server_iv = [0u8; 12];
         let mut server_hp = [0u8; 16];
-
-        client_prk
-            .expand(&[b"quic key"], pr_key_type)
-            .unwrap()
-            .fill(&mut client_key)
-            .unwrap();
-
-        client_prk
-            .expand(&[b"quic iv"], iv_key_type)
-            .unwrap()
-            .fill(&mut client_iv)
-            .unwrap();
-
-        client_prk
-            .expand(&[b"quic hp"], hp_key_type)
-            .unwrap()
-            .fill(&mut client_hp)
-            .unwrap();
-
-        server_prk
-            .expand(&[b"quic key"], pr_key_type)
-            .unwrap()
-            .fill(&mut server_key)
-            .unwrap();
-
-        server_prk
-            .expand(&[b"quic iv"], iv_key_type)
-            .unwrap()
-            .fill(&mut server_iv)
-            .unwrap();
-
-        server_prk
-            .expand(&[b"quic hp"], hp_key_type)
-            .unwrap()
-            .fill(&mut server_hp)
-            .unwrap();
 
         ExchangeSecrets {
             client_key,
@@ -124,9 +81,8 @@ pub struct ClientHello<'a> {
     pub secrets: ExchangeSecrets,
     pub token_len: usize,
     pub payload_len: usize,
-    pub packet_number_bytes: &'a [u8], 
-    pub payload_bytes: &'a [u8],
-    pub auth_bytes: &'a [u8]
+    pub packet_number_len: usize, 
+    pub encrypted_payload: Vec<u8>, 
 }
 
 impl<'a> TryFrom<&'a Vec<u8>> for ClientHello<'a> {
@@ -134,16 +90,16 @@ impl<'a> TryFrom<&'a Vec<u8>> for ClientHello<'a> {
 
     fn try_from(buf: &'a Vec<u8>) -> Result<Self, Self::Error> {
         let mut pos = 0;
-        let is_long = &buf[pos];
+        let first_byte = buf[pos];
         pos += 1;
         let version = &buf[pos..pos + 4];
         pos += 4; 
 
         // Check this is Initial packet (0x00) with long header (bit 7 set)
-        if (is_long & 0x80) == 0 || (is_long & 0x30) != 0 {
+        if (first_byte & 0x30) != 0 {
             return Err(Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Invalid first byte",
+                "Invalid first byte for initial packet",
             ));
         }
         println!("Client Initial Packet Bytes: {:?}", &buf);
@@ -160,71 +116,73 @@ impl<'a> TryFrom<&'a Vec<u8>> for ClientHello<'a> {
         let scid = &buf[pos..pos + scid_len]; 
         pos += scid_len;
 
-        let (token_byte_len, token_len_mask) = match buf[pos] >> 6 {
-            0 => (1, 0x3f),
-            1 => (2, 0x3f),
-            2 => (4, 0x3f),
-            _ => (8, 0x3f),
+        let token_len_byte_len = 1 << (buf[pos] >> 6) as usize;
+
+        let token_len = match token_len_byte_len {
+            1 => (buf[0] & 0x3f) as u64,
+            2 => {
+                (((buf[0] & 0x3f) as u64) << 8) 
+                    | (buf[1] as u64)
+            },
+            4 => {
+                (((buf[0] & 0x3f) as u64) << 24) 
+                    | ((buf[1] as u64) << 16) 
+                    | ((buf[2] as u64) << 8)
+                    | (buf[3] as u64)
+            },
+            _ => {
+                (((buf[0] & 0x3f) as u64) << 56)
+                    | ((buf[1] as u64) << 48)
+                    | ((buf[2] as u64) << 40)
+                    | ((buf[3] as u64) << 32)
+                    | ((buf[4] as u64) << 24)
+                    | ((buf[5] as u64) << 16)
+                    | ((buf[6] as u64) << 8)
+                    | (buf[7] as u64)
+            },
         };
 
-        let mut token_len = (buf[pos] & token_len_mask) as u64;
+        pos += token_len_byte_len;
 
-        for i in 1..token_byte_len {
-            token_len = (token_len << 8) | buf[pos + i] as u64;
-            pos += 1;
-        }
-        pos += 1;
-
-        let (payload_byte_len, payload_len_mask) = match buf[pos] >> 6
-        {
-            0 => (1, 0x3f),
-            1 => (2, 0x3f),
-            2 => (4, 0x3f),
-            _ => (8, 0x3f),
-        };
-
-        let mut payload_len = (buf[pos] & payload_len_mask) as u64;
-
-        for i in 1..payload_byte_len {
-            payload_len = (payload_len << 8) | buf[pos + i] as u64;
-            pos += 1;
-        }
-        pos += 1; 
-
-        let content_bytes = &buf[pos..(pos + payload_len as usize)];
-
-        pos = 0;
-
-        let packet_number_byte_len = match ((content_bytes[pos] & 0x03) + 1) as u8 {
-            0 => 1,
-            1 => 2,
-            2 => 3,
-            _ => 4, 
-        };
-
-        let packet_number_bytes = &content_bytes[pos..pos+packet_number_byte_len];
-        pos += packet_number_byte_len; 
-
-        let auth_start = payload_len.saturating_sub(16) as usize;
-
-        let payload_bytes = &content_bytes[pos..auth_start]; 
-
-        let auth_bytes = &content_bytes[auth_start..payload_len as usize];
-
-        // assert!(auth_bytes.len() == 16);
+        let payload_len_byte_len = 1 << (buf[pos] >> 6) as usize;
         
-        // assert!(payload_bytes.len() == (content_bytes.len() - auth_bytes.len() - packet_number_byte_len)); 
+        let payload_len = match payload_len_byte_len {
+            1 => (buf[0] & 0x3f) as u64,
+            2 => {
+                (((buf[0] & 0x3f) as u64) << 8) 
+                    | (buf[1] as u64)
+            },
+            4 => {
+                (((buf[0] & 0x3f) as u64) << 24) 
+                    | ((buf[1] as u64) << 16) 
+                    | ((buf[2] as u64) << 8)
+                    | (buf[3] as u64)
+            },
+            _ => {
+                (((buf[0] & 0x3f) as u64) << 56)
+                    | ((buf[1] as u64) << 48)
+                    | ((buf[2] as u64) << 40)
+                    | ((buf[3] as u64) << 32)
+                    | ((buf[4] as u64) << 24)
+                    | ((buf[5] as u64) << 16)
+                    | ((buf[6] as u64) << 8)
+                    | (buf[7] as u64)
+            },
+        };
 
-        // assert_ne!(payload_bytes.last(), auth_bytes.first());
+        pos += payload_len_byte_len;
+
+        let packet_number_len = ((first_byte & 0x03) +1) as usize;
+
+        let encrypted_payload = buf[pos..].to_vec();
 
         Ok(ClientHello {
             bytes: &buf,
             secrets: secrets,
             token_len: token_len as usize,
             payload_len: payload_len as usize,
-            packet_number_bytes: &packet_number_bytes, 
-            payload_bytes: &payload_bytes,
-            auth_bytes: &auth_bytes
+            packet_number_len: packet_number_len, 
+            encrypted_payload, 
         })
     }
 }
